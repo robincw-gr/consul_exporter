@@ -1,4 +1,4 @@
-# Consul Exporter [![Build Status](https://travis-ci.org/prometheus/consul_exporter.svg)][travis]
+# Consul Exporter
 
 [![CircleCI](https://circleci.com/gh/prometheus/consul_exporter/tree/master.svg?style=shield)][circleci]
 [![Docker Repository on Quay](https://quay.io/repository/prometheus/consul-exporter/status)][quay]
@@ -20,6 +20,7 @@ make
 | consul_up | Was the last query of Consul successful | |
 | consul_raft_peers | How many peers (servers) are in the Raft cluster | |
 | consul_serf_lan_members | How many members are in the cluster | |
+| consul_serf_lan_member_status | Status of member in the cluster. 1=Alive, 2=Leaving, 3=Left, 4=Failed. | member |
 | consul_catalog_services | How many services are in the cluster | |
 | consul_catalog_service_node_healthy | Is this service healthy on this node | service, node |
 | consul_health_node_status | Status of health checks associated with a node | check, node, status |
@@ -76,7 +77,7 @@ search the entire keyspace.
 ### Environment variables
 
 The consul\_exporter supports all environment variables provided by the official
-[consul/api package](https://github.com/hashicorp/consul/blob/c744792fc4d665363dba0ecfc7d05fdedc9cab32/api/api.go#L23-L43),
+[consul/api package](https://github.com/hashicorp/consul/blob/b2478036d88a7e8eb9d6a0daf1a1c9ad0c8885ca/api/api.go#L24-L74),
 including `CONSUL_HTTP_TOKEN` to set the [ACL](https://www.consul.io/docs/internals/acl.html) token.
 
 ## Useful Queries
@@ -116,8 +117,6 @@ docker run -d -p 9107:9107 --dns=172.17.0.1 --dns-search=service.consul \
         prom/consul-exporter --consul.server=consul:8500
 ```
 
-
 [circleci]: https://circleci.com/gh/prometheus/consul_exporter
 [hub]: https://hub.docker.com/r/prom/consul-exporter/
-[travis]: https://travis-ci.org/prometheus/consul_exporter
 [quay]: https://quay.io/repository/prometheus/consul-exporter

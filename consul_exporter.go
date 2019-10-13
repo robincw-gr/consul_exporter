@@ -1,3 +1,16 @@
+// Copyright 2019 The Prometheus Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -13,13 +26,14 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	consul_api "github.com/hashicorp/consul/api"
 	consul "github.com/hashicorp/consul/consul/structs"
-	"github.com/hashicorp/go-cleanhttp"
+	cleanhttp "github.com/hashicorp/go-cleanhttp"
 )
 
 const (
@@ -46,6 +60,11 @@ var (
 		prometheus.BuildFQName(namespace, "", "serf_lan_members"),
 		"How many members are in the cluster.",
 		nil, nil,
+	)
+	memberStatus = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "serf_lan_member_status"),
+		"Status of member in the cluster. 1=Alive, 2=Leaving, 3=Left, 4=Failed.",
+		[]string{"member"}, nil,
 	)
 	serviceCount = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "catalog_services"),
@@ -80,6 +99,12 @@ var (
 	queryOptions = consul_api.QueryOptions{}
 )
 
+type promHTTPLogger struct{}
+
+func (l promHTTPLogger) Println(v ...interface{}) {
+	log.Error(v...)
+}
+
 // Exporter collects Consul stats from the given server and exports them using
 // the prometheus metrics package.
 type Exporter struct {
@@ -97,6 +122,7 @@ type consulOpts struct {
 	keyFile      string
 	serverName   string
 	timeout      time.Duration
+	insecure     bool
 	requestLimit int
 }
 
@@ -115,10 +141,11 @@ func NewExporter(opts consulOpts, kvPrefix, kvFilter string, healthSummary bool)
 	}
 
 	tlsConfig, err := consul_api.SetupTLSConfig(&consul_api.TLSConfig{
-		Address:  opts.serverName,
-		CAFile:   opts.caFile,
-		CertFile: opts.certFile,
-		KeyFile:  opts.keyFile,
+		Address:            opts.serverName,
+		CAFile:             opts.caFile,
+		CertFile:           opts.certFile,
+		KeyFile:            opts.keyFile,
+		InsecureSkipVerify: opts.insecure,
 	})
 	if err != nil {
 		return nil, err
@@ -129,6 +156,9 @@ func NewExporter(opts consulOpts, kvPrefix, kvFilter string, healthSummary bool)
 	config := consul_api.DefaultConfig()
 	config.Address = u.Host
 	config.Scheme = u.Scheme
+	if config.HttpClient == nil {
+		config.HttpClient = &http.Client{}
+	}
 	config.HttpClient.Timeout = opts.timeout
 	config.HttpClient.Transport = transport
 
@@ -158,6 +188,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- clusterServers
 	ch <- clusterLeader
 	ch <- nodeCount
+	ch <- memberStatus
 	ch <- serviceCount
 	ch <- serviceNodesHealthy
 	ch <- nodeChecks
@@ -210,6 +241,17 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			nodeCount, prometheus.GaugeValue, float64(len(nodes)),
 		)
 	}
+	// Query for member status.
+	members, err := e.client.Agent().Members(false)
+	if err != nil {
+		// FIXME: How should we handle a partial failure like this?
+	} else {
+		for _, entry := range members {
+			ch <- prometheus.MustNewConstMetric(
+				memberStatus, prometheus.GaugeValue, float64(entry.Status), entry.Name,
+			)
+		}
+	}
 
 	// Query for the full list of services.
 	serviceNames, _, err := e.client.Catalog().Services(&queryOptions)
@@ -235,41 +277,41 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		var passing, warning, critical, maintenance float64
 
 		switch hc.Status {
-		case consul.HealthPassing:
+		case consul_api.HealthPassing:
 			passing = 1
-		case consul.HealthWarning:
+		case consul_api.HealthWarning:
 			warning = 1
-		case consul.HealthCritical:
+		case consul_api.HealthCritical:
 			critical = 1
-		case consul.HealthMaint:
+		case consul_api.HealthMaint:
 			maintenance = 1
 		}
 
 		if hc.ServiceID == "" {
 			ch <- prometheus.MustNewConstMetric(
-				nodeChecks, prometheus.GaugeValue, passing, hc.CheckID, hc.Node, consul.HealthPassing,
+				nodeChecks, prometheus.GaugeValue, passing, hc.CheckID, hc.Node, consul_api.HealthPassing,
 			)
 			ch <- prometheus.MustNewConstMetric(
-				nodeChecks, prometheus.GaugeValue, warning, hc.CheckID, hc.Node, consul.HealthWarning,
+				nodeChecks, prometheus.GaugeValue, warning, hc.CheckID, hc.Node, consul_api.HealthWarning,
 			)
 			ch <- prometheus.MustNewConstMetric(
-				nodeChecks, prometheus.GaugeValue, critical, hc.CheckID, hc.Node, consul.HealthCritical,
+				nodeChecks, prometheus.GaugeValue, critical, hc.CheckID, hc.Node, consul_api.HealthCritical,
 			)
 			ch <- prometheus.MustNewConstMetric(
-				nodeChecks, prometheus.GaugeValue, maintenance, hc.CheckID, hc.Node, consul.HealthMaint,
+				nodeChecks, prometheus.GaugeValue, maintenance, hc.CheckID, hc.Node, consul_api.HealthMaint,
 			)
 		} else {
 			ch <- prometheus.MustNewConstMetric(
-				serviceChecks, prometheus.GaugeValue, passing, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul.HealthPassing,
+				serviceChecks, prometheus.GaugeValue, passing, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul_api.HealthPassing,
 			)
 			ch <- prometheus.MustNewConstMetric(
-				serviceChecks, prometheus.GaugeValue, warning, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul.HealthWarning,
+				serviceChecks, prometheus.GaugeValue, warning, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul_api.HealthWarning,
 			)
 			ch <- prometheus.MustNewConstMetric(
-				serviceChecks, prometheus.GaugeValue, critical, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul.HealthCritical,
+				serviceChecks, prometheus.GaugeValue, critical, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul_api.HealthCritical,
 			)
 			ch <- prometheus.MustNewConstMetric(
-				serviceChecks, prometheus.GaugeValue, maintenance, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul.HealthMaint,
+				serviceChecks, prometheus.GaugeValue, maintenance, hc.CheckID, hc.Node, hc.ServiceID, hc.ServiceName, consul_api.HealthMaint,
 			)
 		}
 	}
@@ -301,13 +343,18 @@ func (e *Exporter) collectHealthSummary(ch chan<- prometheus.Metric, serviceName
 	wg.Wait()
 }
 
-func (e *Exporter) collectOneHealthSummary(ch chan<- prometheus.Metric, serviceName string) error {
+func (e *Exporter) collectOneHealthSummary(ch chan<- prometheus.Metric, serviceName string) {
+	// See https://github.com/hashicorp/consul/issues/1096.
+	if strings.HasPrefix(serviceName, "/") {
+		log.Warnf("Skipping service %q because it starts with a slash", serviceName)
+		return
+	}
 	log.Debugf("Fetching health summary for: %s", serviceName)
 
 	service, _, err := e.client.Health().Service(serviceName, "", false, &queryOptions)
 	if err != nil {
 		log.Errorf("Failed to query service health: %v", err)
-		return err
+		return
 	}
 
 	for _, entry := range service {
@@ -316,7 +363,7 @@ func (e *Exporter) collectOneHealthSummary(ch chan<- prometheus.Metric, serviceN
 		// of "passing."
 		passing := 1.
 		for _, hc := range entry.Checks {
-			if hc.Status != consul.HealthPassing {
+			if hc.Status != consul_api.HealthPassing {
 				passing = 0
 				break
 			}
@@ -324,11 +371,15 @@ func (e *Exporter) collectOneHealthSummary(ch chan<- prometheus.Metric, serviceN
 		ch <- prometheus.MustNewConstMetric(
 			serviceNodesHealthy, prometheus.GaugeValue, passing, entry.Service.ID, entry.Node.Node, entry.Service.Service,
 		)
+		tags := make(map[string]struct{})
 		for _, tag := range entry.Service.Tags {
+			if _, ok := tags[tag]; ok {
+				continue
+			}
 			ch <- prometheus.MustNewConstMetric(serviceTag, prometheus.GaugeValue, 1, entry.Service.ID, entry.Node.Node, tag)
+			tags[tag] = struct{}{}
 		}
 	}
-	return nil
 }
 
 func (e *Exporter) collectKeyValues(ch chan<- prometheus.Metric) {
@@ -374,7 +425,8 @@ func main() {
 	kingpin.Flag("consul.cert-file", "File path to a PEM-encoded certificate used with the private key to verify the exporter's authenticity.").Default("").StringVar(&opts.certFile)
 	kingpin.Flag("consul.key-file", "File path to a PEM-encoded private key used with the certificate to verify the exporter's authenticity.").Default("").StringVar(&opts.keyFile)
 	kingpin.Flag("consul.server-name", "When provided, this overrides the hostname for the TLS certificate. It can be used to ensure that the certificate name matches the hostname we declare.").Default("").StringVar(&opts.serverName)
-	kingpin.Flag("consul.timeout", "Timeout on HTTP requests to consul.").Default("200ms").DurationVar(&opts.timeout)
+	kingpin.Flag("consul.timeout", "Timeout on HTTP requests to the Consul API.").Default("500ms").DurationVar(&opts.timeout)
+	kingpin.Flag("consul.insecure", "Disable TLS host verification.").Default("false").BoolVar(&opts.insecure)
 	kingpin.Flag("consul.request-limit", "Limit the maximum number of concurrent requests to consul.").Default("1").IntVar(&opts.requestLimit)
 
 	// Query options.
@@ -395,12 +447,22 @@ func main() {
 	}
 	prometheus.MustRegister(exporter)
 
-	queryOptionsJson, err := json.Marshal(queryOptions)
+	queryOptionsJson, err := json.MarshalIndent(queryOptions, "", "    ")
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	http.Handle(*metricsPath, prometheus.Handler())
+	http.Handle(*metricsPath,
+		promhttp.InstrumentMetricHandler(
+			prometheus.DefaultRegisterer,
+			promhttp.HandlerFor(
+				prometheus.DefaultGatherer,
+				promhttp.HandlerOpts{
+					ErrorLog: &promHTTPLogger{},
+				},
+			),
+		),
+	)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
              <head><title>Consul Exporter</title></head>
